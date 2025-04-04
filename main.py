@@ -10,6 +10,9 @@ import json
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 class Doc88Downloader:
     def __init__(self, root):
@@ -29,6 +32,25 @@ class Doc88Downloader:
         
         # 下载状态
         self.downloading = False
+        
+        # 创建具有重试功能的session
+        self.setup_session()
+        
+    def setup_session(self):
+        # 创建自定义session，带有重试机制
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=5,  # 最多重试5次
+            backoff_factor=1,  # 重试间隔时间系数
+            status_forcelist=[429, 500, 502, 503, 504],  # 特定HTTP状态码的重试
+            allowed_methods=["GET", "POST"]  # 允许重试的请求方法
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        
+        # 设置默认超时时间
+        self.timeout = 30
         
     def create_widgets(self):
         # 创建主框架
@@ -148,7 +170,7 @@ class Doc88Downloader:
             url = f'https://m.doc88.com/doc.php?act=info&p_code={p_code}&key=3854933de90d1dbb321d8ca29eac130a&v=1'
             
             self.update_status("正在获取文档信息...")
-            result = requests.get(url, headers=header)
+            result = self.session.get(url, headers=header, timeout=self.timeout)
             return_data = result.text
             
             # 第二步：解码data获取gif信息
@@ -177,9 +199,31 @@ class Doc88Downloader:
                 gif_url = gif_host + "/get-" + element['u'] + ".gif"
                 self.update_status(f"正在下载第 {index+1}/{len(gif_urls)} 页")
                 
-                result = requests.get(gif_url)
-                with open(os.path.join(save_dir, f'{index:07d}.gif'), 'wb') as f:
-                    f.write(result.content)
+                # 添加重试逻辑
+                max_retries = 3
+                retry_count = 0
+                success = False
+                
+                while retry_count < max_retries and not success:
+                    try:
+                        result = self.session.get(gif_url, timeout=self.timeout, verify=True)
+                        result.raise_for_status()  # 检查HTTP状态码
+                        
+                        with open(os.path.join(save_dir, f'{index:07d}.gif'), 'wb') as f:
+                            f.write(result.content)
+                        
+                        success = True
+                    except requests.exceptions.SSLError as ssl_err:
+                        retry_count += 1
+                        self.log(f"SSL错误，第{retry_count}次尝试重新下载: {str(ssl_err)}")
+                        time.sleep(2)  # 等待2秒后重试
+                    except requests.exceptions.RequestException as req_err:
+                        retry_count += 1
+                        self.log(f"请求错误，第{retry_count}次尝试重新下载: {str(req_err)}")
+                        time.sleep(2)  # 等待2秒后重试
+                
+                if not success:
+                    self.log(f"下载第{index+1}页失败，跳过此页")
                 
                 # 更新进度条
                 self.progress["value"] = (index + 1) / len(gif_urls) * 80
